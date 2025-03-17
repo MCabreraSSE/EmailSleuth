@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analizador de Correos Electrónicos</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .upload-area {
+            border: 2px dashed #ccc;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            background: #f8f9fa;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .upload-area:hover {
+            border-color: #0d6efd;
+            background: #f1f3f5;
+        }
+        .file-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .report-card {
+            transition: all 0.3s ease;
+        }
+        .report-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container py-5">
+        <h1 class="text-center mb-5">
+            <i class="fas fa-envelope-open-text text-primary"></i>
+            Analizador de Correos Electrónicos
+        </h1>
+
+        <div class="row justify-content-center">
+            <div class="col-md-8">
+                <div class="card shadow-sm">
+                    <div class="card-body">
+                        <div class="upload-area mb-4" id="dropZone">
+                            <i class="fas fa-cloud-upload-alt fa-3x text-primary mb-3"></i>
+                            <h5>Arrastra y suelta tus archivos .eml aquí</h5>
+                            <p class="text-muted">o</p>
+                            <input type="file" id="fileInput" multiple accept=".eml" class="d-none">
+                            <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+                                Seleccionar archivos
+                            </button>
+                        </div>
+
+                        <div id="fileList" class="file-list mb-4"></div>
+
+                        <div class="text-center">
+                            <button id="analyzeBtn" class="btn btn-success" disabled>
+                                <i class="fas fa-search"></i> Analizar correos
+                            </button>
+                        </div>
+
+                        <div id="progress" class="progress mt-3 d-none">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar"></div>
+                        </div>
+
+                        <div id="results" class="mt-4"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileList = document.getElementById('fileList');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const progress = document.getElementById('progress');
+        const results = document.getElementById('results');
+        let files = [];
+
+        // Prevenir comportamiento por defecto del navegador
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        // Efectos visuales durante el drag & drop
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, highlight, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, unhighlight, false);
+        });
+
+        function highlight(e) {
+            dropZone.classList.add('border-primary');
+        }
+
+        function unhighlight(e) {
+            dropZone.classList.remove('border-primary');
+        }
+
+        // Manejar archivos soltados
+        dropZone.addEventListener('drop', handleDrop, false);
+        fileInput.addEventListener('change', handleFiles, false);
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const droppedFiles = dt.files;
+            handleFiles({ target: { files: droppedFiles } });
+        }
+
+        function handleFiles(e) {
+            const newFiles = [...e.target.files].filter(file => file.name.endsWith('.eml'));
+            files = [...files, ...newFiles];
+            updateFileList();
+            analyzeBtn.disabled = files.length === 0;
+        }
+
+        function updateFileList() {
+            fileList.innerHTML = files.map((file, index) => `
+                <div class="d-flex justify-content-between align-items-center p-2 border-bottom">
+                    <div>
+                        <i class="fas fa-envelope text-primary"></i>
+                        ${file.name}
+                    </div>
+                    <button class="btn btn-sm btn-danger" onclick="removeFile(${index})">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        function removeFile(index) {
+            files.splice(index, 1);
+            updateFileList();
+            analyzeBtn.disabled = files.length === 0;
+        }
+
+        // Analizar archivos
+        analyzeBtn.addEventListener('click', async () => {
+            const formData = new FormData();
+            files.forEach(file => formData.append('files[]', file));
+
+            progress.classList.remove('d-none');
+            analyzeBtn.disabled = true;
+            results.innerHTML = '';
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    results.innerHTML = `
+                        <div class="alert alert-success">
+                            <i class="fas fa-check-circle"></i> ${data.mensaje}
+                        </div>
+                        <div class="row">
+                            ${data.reportes.map(reporte => `
+                                <div class="col-md-6 mb-3">
+                                    <div class="card report-card">
+                                        <div class="card-body">
+                                            <h5 class="card-title">
+                                                <i class="fas fa-file-alt text-primary"></i>
+                                                ${reporte.nombre}
+                                            </h5>
+                                            <a href="/download/${encodeURIComponent(reporte.ruta)}" 
+                                               class="btn btn-sm btn-outline-primary">
+                                                <i class="fas fa-download"></i> Descargar
+                                            </a>
+                                        </div>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    `;
+                } else {
+                    results.innerHTML = `
+                        <div class="alert alert-danger">
+                            <i class="fas fa-exclamation-circle"></i> ${data.error}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                results.innerHTML = `
+                    <div class="alert alert-danger">
+                        <i class="fas fa-exclamation-circle"></i> Error al procesar los archivos
+                    </div>
+                `;
+            } finally {
+                progress.classList.add('d-none');
+                analyzeBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html> 
