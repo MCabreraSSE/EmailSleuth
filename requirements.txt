@@ -25,11 +25,17 @@ Flask>=2.3,<4
 
 # Agent framework and ML hub
 smolagents>=0.2.0
-huggingface_hub>=0.22,<0.25
+huggingface_hub>=0.25,<0.40
 
 # Data processing
 pandas>=2.0,<3
 openpyxl>=3.1,<4
+
+# Imaging
+pillow>=11.0.0
+
+# Word documents
+python-docx>=1.1,<2
 
 # LLM client wrapper for LiteLLMModel
 litellm>=1.40,<2

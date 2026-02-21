@@ -11,7 +11,9 @@ UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'eml'}
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
+#app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
+app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # 30MB max-limit
+
 
 # Crear directorio de uploads si no existe
 if not os.path.exists(UPLOAD_FOLDER):
@@ -52,13 +54,26 @@ def upload_file():
             end_date=None,
             extract_attachments=True
         )
+        # Extraer el bloque principal del reporte para mostrarlo en la web
+        resumen = ""
+        if isinstance(result, str):
+            # Quitar líneas vacías y espacios a los lados
+            lineas = [l.strip() for l in result.strip().splitlines() if l.strip()]
+            # Buscar el inicio del bloque "Reporte de Análisis de Correos Electrónicos"
+            indice_inicio = None
+            for i, linea in enumerate(lineas):
+                if "Reporte de Análisis de Correos Electrónicos" in linea:
+                    indice_inicio = i
+                    break
+            if indice_inicio is not None:
+                resumen = "\n".join(lineas[indice_inicio:indice_inicio + 4])
         
         # Buscar los archivos de reporte generados
         reportes_dir = os.path.join(temp_dir, "reportes")
         reportes = []
         if os.path.exists(reportes_dir):
             for file in os.listdir(reportes_dir):
-                if file.endswith(('.txt', '.json', '.csv', '.xlsx')):
+                if file.endswith(('.txt', '.json', '.csv', '.xlsx', '.html', '.docx')):
                     reportes.append({
                         'nombre': file,
                         'ruta': os.path.join(reportes_dir, file)
@@ -66,6 +81,7 @@ def upload_file():
         
         return jsonify({
             'mensaje': 'Análisis completado exitosamente',
+            'resumen': resumen,
             'reportes': reportes
         })
         

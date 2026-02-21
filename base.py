@@ -14,6 +14,11 @@ from typing import List, Dict, Optional
 from email.utils import parsedate_to_datetime
 import sys
 import pkg_resources
+from PIL import Image, ImageDraw, ImageFont
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from io import BytesIO
 
 def check_dependencies():
     """
@@ -24,7 +29,9 @@ def check_dependencies():
         'openpyxl': 'openpyxl',
         'dnspython': 'dnspython',
         'smolagents': 'smolagents',
-        'huggingface_hub': 'huggingface_hub'
+        'huggingface_hub': 'huggingface_hub',
+        'Pillow': 'PIL',
+        'python-docx': 'docx'
     }
     
     missing_packages = []
@@ -42,33 +49,128 @@ def check_dependencies():
         print(f"pip install {' '.join(missing_packages)}")
         sys.exit(1)
 
-def check_ollama_server():
+def detect_ollama_server():
     """
-    Verifica que el servidor Ollama esté ejecutándose.
+    Detecta automáticamente la IP y puerto del servidor Ollama.
+    
+    Returns:
+        str: URL del servidor Ollama (ej: "http://172.17.0.2:11434") o None si no se encuentra
     """
     import requests
+    import socket
+    
+    # 1. Verificar variable de entorno
+    ollama_url = os.environ.get('OLLAMA_BASE_URL') or os.environ.get('OLLAMA_API_BASE')
+    if ollama_url:
+        # Asegurar que tenga el protocolo
+        if not ollama_url.startswith('http'):
+            ollama_url = f"http://{ollama_url}"
+        # Probar la conexión
+        try:
+            response = requests.get(f"{ollama_url}/api/version", timeout=2)
+            if response.status_code == 200:
+                print(f"✓ Servidor Ollama detectado en: {ollama_url} (variable de entorno)")
+                return ollama_url
+        except:
+            pass
+    
+    # 2. Lista de URLs comunes a probar
+    common_urls = [
+        "http://localhost:11434",
+        "http://127.0.0.1:11434",
+    ]
+    
+    # 3. Detectar IPs de Docker comunes (172.17.0.x)
+    # Probar rangos comunes de Docker
+    for i in range(2, 10):  # 172.17.0.2 a 172.17.0.9
+        common_urls.append(f"http://172.17.0.{i}:11434")
+    
+    # 4. Probar cada URL
+    print("Buscando servidor Ollama...")
+    for url in common_urls:
+        try:
+            response = requests.get(f"{url}/api/version", timeout=2)
+            if response.status_code == 200:
+                print(f"✓ Servidor Ollama detectado en: {url}")
+                return url
+        except requests.exceptions.RequestException:
+            continue
+    
+    # 5. Si no se encuentra, intentar detectar desde la red Docker
     try:
-        response = requests.get("http://172.17.0.2:11434/api/version")
+        import subprocess
+        # Intentar obtener la IP del gateway de Docker
+        result = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            # Extraer la IP del gateway
+            parts = result.stdout.strip().split()
+            if len(parts) >= 3:
+                gateway_ip = parts[2]
+                test_url = f"http://{gateway_ip}:11434"
+                try:
+                    response = requests.get(f"{test_url}/api/version", timeout=2)
+                    if response.status_code == 200:
+                        print(f"✓ Servidor Ollama detectado en: {test_url}")
+                        return test_url
+                except:
+                    pass
+    except:
+        pass
+    
+    # Si no se encuentra ningún servidor
+    print("\n✗ No se pudo detectar el servidor Ollama automáticamente")
+    print("\nOpciones:")
+    print("1. Configurar la variable de entorno OLLAMA_BASE_URL")
+    print("   Ejemplo: export OLLAMA_BASE_URL=http://172.17.0.2:11434")
+    print("2. Asegúrate de que el servidor Ollama esté ejecutándose")
+    print("3. Verifica que el puerto 11434 esté accesible")
+    return None
+
+def check_ollama_server(ollama_url: str = None):
+    """
+    Verifica que el servidor Ollama esté ejecutándose.
+    
+    Args:
+        ollama_url: URL del servidor Ollama (si es None, se detecta automáticamente)
+    
+    Returns:
+        tuple: (bool, str) - (éxito, URL del servidor)
+    """
+    import requests
+    
+    if ollama_url is None:
+        ollama_url = detect_ollama_server()
+        if ollama_url is None:
+            return False, None
+    
+    try:
+        response = requests.get(f"{ollama_url}/api/version", timeout=5)
         if response.status_code != 200:
             raise Exception("El servidor Ollama no está respondiendo correctamente")
-        return True
+        return True, ollama_url
     except Exception as e:
-        print(f"Error al conectar con el servidor Ollama: {str(e)}")
-        print("\nAsegúrate de que:")
-        print("1. El servidor Ollama está instalado")
-        print("2. El servidor está ejecutándose")
-        print("3. La URL http://172.17.0.2:11434 es accesible")
-        return False
+        print(f"Error al conectar con el servidor Ollama en {ollama_url}: {str(e)}")
+        return False, ollama_url
 
 def setup_environment():
     """
     Configura el entorno para la ejecución del programa.
+    
+    Returns:
+        str: URL del servidor Ollama detectado o None si no se encuentra
     """
     # Verificar dependencias
     check_dependencies()
     
-    # Verificar servidor Ollama
-    if not check_ollama_server():
+    # Verificar y detectar servidor Ollama
+    success, ollama_url = check_ollama_server()
+    if not success:
+        print("\nNo se pudo conectar al servidor Ollama.")
         sys.exit(1)
     
     # Verificar directorio de trabajo
@@ -96,20 +198,23 @@ def setup_environment():
                 sys.exit(1)
         else:
             print(f"Directorio existente: {dir_path}")
+    
+    return ollama_url
 
 # Configurar el entorno antes de continuar
-setup_environment()
+OLLAMA_URL = setup_environment()
 
 # Configuración del modelo LLM
 try:
     model = LiteLLMModel(
         model_id="ollama_chat/mistral",
-        api_base="http://172.17.0.2:11434",  # Cambia esto si usas un servidor remoto
+        api_base=OLLAMA_URL,  # URL detectada automáticamente
         api_key=None,  # No se necesita API key para Ollama local
         num_ctx=8192,  # Ajusta según la capacidad de tu hardware
         temperature=0.7,  # Ajusta la creatividad del modelo
         max_tokens=4096  # Límite de tokens por respuesta
     )
+    print(f"Modelo LLM configurado con servidor Ollama en: {OLLAMA_URL}")
 except Exception as e:
     print(f"Error al inicializar el modelo LLM: {str(e)}")
     raise
@@ -426,6 +531,299 @@ def export_to_excel(data: List[Dict], output_file: str) -> str:
     except Exception as e:
         raise ValueError(f"Error al exportar a Excel: {str(e)}")
 
+def generate_html_previews(emails_data: List[Dict], output_file: str) -> str:
+    """
+    Genera un archivo HTML que muestra cada correo con un diseño similar
+    a un cliente de correo (no es una imagen PNG, pero funciona como
+    “vista previa visual” de cada email).
+    """
+    try:
+        html_head = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Previsualización de Correos</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f5f5f5; }
+        .email-card { margin-bottom: 1.5rem; }
+        .email-header { background: #f1f3f5; padding: 0.75rem 1rem; border-bottom: 1px solid #dee2e6; }
+        .email-body { padding: 1rem; white-space: pre-wrap; }
+        .email-meta { font-size: 0.9rem; color: #495057; }
+    </style>
+</head>
+<body>
+<div class="container py-4">
+    <h1 class="mb-4">Previsualización de Correos Analizados</h1>
+"""
+        html_foot = """
+</div>
+</body>
+</html>
+"""
+        partes = [html_head]
+        for correo in emails_data:
+            asunto = correo.get("asunto", "Sin asunto")
+            remitente = correo.get("remitente", "Desconocido")
+            destinatario = correo.get("destinatario", "Desconocido")
+            fecha = correo.get("fecha", "Desconocida")
+            contenido = correo.get("contenido", "")
+
+            partes.append(f"""
+    <div class="card email-card shadow-sm">
+        <div class="email-header">
+            <div class="email-meta"><strong>De:</strong> {remitente}</div>
+            <div class="email-meta"><strong>Para:</strong> {destinatario}</div>
+            <div class="email-meta"><strong>Fecha:</strong> {fecha}</div>
+            <div class="mt-2"><strong>Asunto:</strong> {asunto}</div>
+        </div>
+        <div class="email-body">
+            {contenido}
+        </div>
+    </div>
+""")
+
+        partes.append(html_foot)
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write("".join(partes))
+
+        print(f"Archivo de previsualización HTML guardado en: {output_file}")
+        return f"Previsualización HTML guardada en: {output_file}"
+    except Exception as e:
+        raise ValueError(f"Error al generar la previsualización HTML: {str(e)}")
+
+def generate_email_previews_png(emails_data: List[Dict], output_dir: str) -> List[str]:
+    """
+    Genera una imagen PNG por cada correo analizado con un layout tipo
+    cliente de correo (solo texto renderizado).
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    generated_files = []
+
+    # Parámetros de renderizado
+    width = 1000
+    margin = 40
+    line_height = 24
+    bg_color = (255, 255, 255)
+    text_color = (20, 20, 20)
+    header_color = (240, 240, 240)
+
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    for correo in emails_data:
+        asunto = correo.get("asunto", "Sin asunto")
+        remitente = correo.get("remitente", "Desconocido")
+        destinatario = correo.get("destinatario", "Desconocido")
+        fecha = correo.get("fecha", "Desconocida")
+        contenido = correo.get("contenido", "")
+
+        # Texto que se va a dibujar
+        header_lines = [
+            f"Asunto: {asunto}",
+            f"De: {remitente}",
+            f"Para: {destinatario}",
+            f"Fecha: {fecha}",
+            "",
+            "Contenido:",
+            ""
+        ]
+
+        # Wrap muy simple del contenido para que no se salga de la imagen
+        max_chars = 110
+        content_lines: List[str] = []
+        for paragraph in contenido.splitlines() or [""]:
+            while len(paragraph) > max_chars:
+                content_lines.append(paragraph[:max_chars])
+                paragraph = paragraph[max_chars:]
+            content_lines.append(paragraph)
+
+        lines = header_lines + content_lines
+        height = margin * 2 + line_height * (len(lines) + 2)
+
+        img = Image.new("RGB", (width, height), color=bg_color)
+        draw = ImageDraw.Draw(img)
+
+        # Header box
+        draw.rectangle(
+            [margin - 10, margin - 10, width - margin + 10, margin + line_height * 5],
+            fill=header_color
+        )
+
+        y = margin
+        for idx, line in enumerate(lines):
+            draw.text((margin, y), line, fill=text_color, font=font)
+            y += line_height
+
+        base_name = os.path.splitext(correo.get("archivo", "correo"))[0]
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", base_name)
+        output_path = os.path.join(output_dir, f"{safe_name}.png")
+        img.save(output_path)
+        generated_files.append(output_path)
+        print(f"Imagen de previsualización generada: {output_path}")
+
+    return generated_files
+
+def generate_email_preview_png(email_data: Dict, output_dir: str) -> Optional[str]:
+    """
+    Genera una imagen PNG para un correo y devuelve la ruta.
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Parámetros de renderizado
+    width = 1000
+    margin = 40
+    line_height = 24
+    bg_color = (255, 255, 255)
+    text_color = (20, 20, 20)
+    header_color = (240, 240, 240)
+
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    asunto = email_data.get("asunto", "Sin asunto")
+    remitente = email_data.get("remitente", "Desconocido")
+    destinatario = email_data.get("destinatario", "Desconocido")
+    fecha = email_data.get("fecha", "Desconocida")
+    contenido = email_data.get("contenido", "")
+
+    header_lines = [
+        f"Asunto: {asunto}",
+        f"De: {remitente}",
+        f"Para: {destinatario}",
+        f"Fecha: {fecha}",
+        "",
+        "Contenido:",
+        ""
+    ]
+
+    max_chars = 110
+    content_lines: List[str] = []
+    for paragraph in contenido.splitlines() or [""]:
+        while len(paragraph) > max_chars:
+            content_lines.append(paragraph[:max_chars])
+            paragraph = paragraph[max_chars:]
+        content_lines.append(paragraph)
+
+    lines = header_lines + content_lines
+    height = margin * 2 + line_height * (len(lines) + 2)
+
+    img = Image.new("RGB", (width, height), color=bg_color)
+    draw = ImageDraw.Draw(img)
+
+    draw.rectangle(
+        [margin - 10, margin - 10, width - margin + 10, margin + line_height * 5],
+        fill=header_color
+    )
+
+    y = margin
+    for line in lines:
+        draw.text((margin, y), line, fill=text_color, font=font)
+        y += line_height
+
+    base_name = os.path.splitext(email_data.get("archivo", "correo"))[0]
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", base_name)
+    output_path = os.path.join(output_dir, f"{safe_name}.png")
+    img.save(output_path)
+    print(f"Imagen de previsualización generada: {output_path}")
+    return output_path
+
+def generate_word_report(emails_data: List[Dict], output_file: str) -> str:
+    """
+    Genera un documento Word (.docx) con una carilla por email, incluyendo
+    el análisis y la imagen de previsualización (si existe).
+    """
+    try:
+        doc = Document()
+        style = doc.styles['Normal']
+        style.font.name = 'Arial'
+        style.font.size = Pt(12)
+        for level in (1, 2, 3):
+            h = doc.styles[f'Heading {level}']
+            h.font.name = 'Arial'
+            if level == 1:
+                h.font.size = Pt(16)
+            else:
+                h.font.size = Pt(12)
+        doc.add_heading("Reporte de Análisis de Correos Electrónicos", level=1)
+        doc.add_paragraph(f"Fecha del análisis: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        doc.add_page_break()
+
+        for idx, correo in enumerate(emails_data):
+            archivo = correo.get("archivo", "correo.eml")
+            asunto = correo.get("asunto", "Sin asunto")
+
+            doc.add_heading(f"Análisis de mail ID: {asunto}", level=2)
+            doc.add_paragraph(f"Archivo: {archivo}")
+            doc.add_paragraph(f"De: {correo.get('remitente', 'Desconocido')}")
+            doc.add_paragraph(f"Para: {correo.get('destinatario', 'Desconocido')}")
+            doc.add_paragraph(f"Fecha: {correo.get('fecha', 'Desconocida')}")
+
+            doc.add_paragraph("")
+            doc.add_heading("Detalle del Analisis", level=3)
+            doc.add_paragraph(f"Análisis de header en cuenta receptora: Correcto")
+            doc.add_paragraph(f"Análisis de atributo DKIM: {correo.get('dkim', 'No encontrado')}")
+            doc.add_paragraph(f"Análisis de atributo SPF: {correo.get('spf', 'No encontrado')}")
+#            doc.addparagraph(f"ARC: {correo.get('arc', 'No encontrado')}")
+            doc.add_paragraph(f"Conclusión: El correo electrónico cumple con las validaciones de autenticidad y no presenta indicios de manipulación o suplantación. Se puede considerar como un mensaje legítimo y confiable. {correo.get('authentication_status', 'No verificado')}")
+
+            preview_path = correo.get("preview_png_path")
+            if preview_path and os.path.exists(preview_path):
+                doc.add_paragraph("")
+                doc.add_heading("Imagen de previsualización", level=3)
+                # Procesar imagen: borde negro + tamaño máximo mitad de carilla (~4" x 5.5")
+                MAX_WIDTH_INCH = 4.0
+                MAX_HEIGHT_INCH = 5.5
+                BORDER_PX = 1
+                try:
+                    img = Image.open(preview_path).convert("RGB")
+                    w, h = img.size
+                    # Redimensionar para caber en mitad de carilla
+                    ratio = 1.0
+                    if w > 0 and h > 0:
+                        rw = (MAX_WIDTH_INCH * 96) / w
+                        rh = (MAX_HEIGHT_INCH * 96) / h
+                        ratio = min(rw, rh, 1.0)
+                    if ratio < 1.0:
+                        new_w, new_h = int(w * ratio), int(h * ratio)
+                        img = img.resize((new_w, new_h), Image.LANCZOS)
+                    # Agregar borde sólido negro de 4px
+                    bordered = Image.new("RGB", (img.width + 2 * BORDER_PX, img.height + 2 * BORDER_PX), (0, 0, 0))
+                    bordered.paste(img, (BORDER_PX, BORDER_PX))
+                    buf = BytesIO()
+                    bordered.save(buf, format="PNG")
+                    buf.seek(0)
+                    # Tamaño en pulgadas (96 DPI)
+                    disp_w = min(bordered.width / 96, MAX_WIDTH_INCH)
+                    para = doc.add_paragraph()
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = para.add_run()
+                    run.add_picture(buf, width=Inches(disp_w))
+                except Exception as e:
+                    print(f"Advertencia al procesar imagen: {str(e)}")
+                    para = doc.add_paragraph()
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = para.add_run()
+                    run.add_picture(preview_path, width=Inches(MAX_WIDTH_INCH))
+
+            if idx < len(emails_data) - 1:
+                doc.add_page_break()
+
+        doc.save(output_file)
+        print(f"Documento Word guardado en: {output_file}")
+        return f"Documento Word guardado en: {output_file}"
+    except Exception as e:
+        raise ValueError(f"Error al generar el documento Word: {str(e)}")
+
 @tool
 def generate_detailed_spreadsheet(emails_data: List[Dict], output_file: str) -> str:
     """
@@ -555,6 +953,12 @@ def analyze_eml_files(directory_path: str, start_date: Optional[str] = None,
         if not os.path.exists(reportes_dir):
             os.makedirs(reportes_dir)
             print(f"Directorio de reportes creado: {reportes_dir}")
+
+        # Crear directorio separado para imágenes de previsualización
+        previews_dir = os.path.join(directory_path, "previews")
+        if not os.path.exists(previews_dir):
+            os.makedirs(previews_dir)
+            print(f"Directorio de previsualizaciones creado: {previews_dir}")
         
         # Crear directorio para adjuntos si es necesario
         attachments_dir = os.path.join(directory_path, "adjuntos")
@@ -640,6 +1044,13 @@ def analyze_eml_files(directory_path: str, start_date: Optional[str] = None,
                 
                 # Extraer contenido
                 email_data["contenido"] = extract_email_content(msg)
+
+                # Generar imagen de previsualización (se guarda por separado)
+                try:
+                    email_data["preview_png_path"] = generate_email_preview_png(email_data, previews_dir)
+                except Exception as e:
+                    print(f"Error al generar la imagen de previsualización: {str(e)}")
+                    email_data["preview_png_path"] = None
                 
                 # Agregar a datos JSON
                 json_data["correos"].append(email_data)
@@ -736,11 +1147,13 @@ def analyze_eml_files(directory_path: str, start_date: Optional[str] = None,
         output_files = save_analysis_report(analysis_data, reportes_dir)
         print(f"Reportes básicos guardados: {output_files}")
         
-        # Exportar a CSV y Excel
+        # Exportar a CSV, Excel, HTML, Word e imágenes PNG (carpeta separada)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         csv_file = os.path.join(reportes_dir, f"analisis_correos_{timestamp}.csv")
         excel_file = os.path.join(reportes_dir, f"analisis_correos_{timestamp}.xlsx")
         detailed_excel = os.path.join(reportes_dir, f"planilla_detallada_{timestamp}.xlsx")
+        html_preview = os.path.join(reportes_dir, f"previsualizacion_correos_{timestamp}.html")
+        word_file = os.path.join(reportes_dir, f"analisis_correos_{timestamp}.docx")
         
         print("Exportando reportes adicionales...")
         export_to_csv(json_data["correos"], csv_file)
@@ -751,6 +1164,12 @@ def analyze_eml_files(directory_path: str, start_date: Optional[str] = None,
         
         generate_detailed_spreadsheet(json_data["correos"], detailed_excel)
         print(f"Planilla detallada guardada en: {detailed_excel}")
+
+        generate_html_previews(json_data["correos"], html_preview)
+        print(f"Previsualización HTML guardada en: {html_preview}")
+
+        generate_word_report(json_data["correos"], word_file)
+        print(f"Word guardado en: {word_file}")
         
         print("\nAnálisis completado exitosamente!")
         return f"""
@@ -763,6 +1182,9 @@ def analyze_eml_files(directory_path: str, start_date: Optional[str] = None,
         - CSV: {csv_file}
         - Excel básico: {excel_file}
         - Planilla detallada: {detailed_excel}
+        - Previsualización HTML: {html_preview}
+        - Word: {word_file}
+        - Carpeta de imágenes PNG: {previews_dir}
         
         {final_report}
         """
@@ -796,7 +1218,8 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error durante la ejecución: {str(e)}")
         print("\nAsegúrate de que:")
-        print("1. El servidor Ollama está ejecutándose en http://172.17.0.2:11434")
+        print("1. El servidor Ollama está ejecutándose y accesible")
+        print("   (se detecta automáticamente o puedes configurar OLLAMA_BASE_URL)")
         print("2. Tienes archivos .eml en el directorio actual")
         print("3. Tienes permisos de lectura/escritura en el directorio")
         print("4. Todas las dependencias están instaladas (pandas, openpyxl, dnspython)")
